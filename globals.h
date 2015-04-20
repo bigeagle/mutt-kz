@@ -108,6 +108,7 @@ WHERE char *PopUser INITVAL (NULL);
 #endif
 WHERE char *PostIndentString;
 WHERE char *Postponed;
+WHERE char *PostponeEncryptAs;
 WHERE char *Prefix;
 WHERE char *PrintCmd;
 WHERE char *QueryCmd;
@@ -218,6 +219,7 @@ WHERE short DrawFullLine INITVAL(0);
 WHERE short SidebarWidth;
 WHERE short SidebarRefresh;
 WHERE short SidebarLastRefresh;
+WHERE LIST *SidebarWhitelist INITVAL(0);
 #ifdef USE_IMAP
 WHERE short ImapKeepalive;
 WHERE short ImapPipelineDepth;
@@ -254,7 +256,6 @@ WHERE char *PgpGetkeysCommand;
 
 /*-- formerly in smime.h --*/
 WHERE char *SmimeDefaultKey;
-WHERE char *SmimeCryptAlg;
 WHERE short SmimeTimeout;
 WHERE char *SmimeCertificates;
 WHERE char *SmimeKeys;

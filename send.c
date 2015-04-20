@@ -1133,8 +1133,9 @@ ci_send_message (int flags,		/* send mode */
   BODY *save_content = NULL;
   BODY *clear_content = NULL;
   char *pgpkeylist = NULL;
-  /* save current value of "pgp_sign_as" */
-  char *signas = NULL;
+  /* save current value of "pgp_sign_as"  and "smime_default_key" */
+  char *pgp_signas = NULL;
+  char *smime_default_key = NULL;
   char *tag = NULL, *err = NULL;
   char *ctype;
   char *finalpath = NULL;
@@ -1155,8 +1156,13 @@ ci_send_message (int flags,		/* send mode */
   }
   
   
-  if ((WithCrypto & APPLICATION_PGP) && (flags & SENDPOSTPONED))
-    signas = safe_strdup(PgpSignAs);
+  if (flags & SENDPOSTPONED)
+  {
+    if (WithCrypto & APPLICATION_PGP)
+      pgp_signas = safe_strdup(PgpSignAs);
+    if (WithCrypto & APPLICATION_SMIME)
+      smime_default_key = safe_strdup(SmimeDefaultKey);
+  }
 
   /* Delay expansion of aliases until absolutely necessary--shouldn't
    * be necessary unless we are prompting the user or about to execute a
@@ -1475,7 +1481,7 @@ ci_send_message (int flags,		/* send mode */
 	msg->security |= INLINE;
     }
 
-    if (msg->security)
+    if (msg->security || option (OPTCRYPTOPPORTUNISTICENCRYPT))
     {
       /* 
        * When replying / forwarding, use the original message's
@@ -1510,6 +1516,12 @@ ci_send_message (int flags,		/* send mode */
 	else if ((WithCrypto & APPLICATION_SMIME) && option (OPTCRYPTAUTOSMIME))
 	  msg->security |= APPLICATION_SMIME;
       }
+    }
+
+    /* opportunistic encrypt relys on SMIME or PGP already being selected */
+    if (option (OPTCRYPTOPPORTUNISTICENCRYPT))
+    {
+      crypt_opportunistic_encrypt(msg);
     }
 
     /* No permissible mechanisms found.  Don't sign or encrypt. */
@@ -1558,6 +1570,28 @@ main_loop:
       /* postpone the message until later. */
       if (msg->content->next)
 	msg->content = mutt_make_multipart (msg->content);
+
+      if (WithCrypto && option (OPTPOSTPONEENCRYPT) && PostponeEncryptAs
+          && (msg->security & ENCRYPT))
+      {
+        int is_signed = msg->security & SIGN;
+        if (is_signed)
+          msg->security &= ~SIGN;
+
+        pgpkeylist = safe_strdup (PostponeEncryptAs);
+        if (mutt_protect (msg, pgpkeylist) == -1)
+        {
+          if (is_signed)
+            msg->security |= SIGN;
+          FREE (&pgpkeylist);
+          msg->content = mutt_remove_multipart (msg->content);
+          goto main_loop;
+        }
+
+        if (is_signed)
+          msg->security |= SIGN;
+        FREE (&pgpkeylist);
+      }
 
       /*
        * make sure the message is written to the right part of a maildir 
@@ -1646,7 +1680,7 @@ main_loop:
       /* save the decrypted attachments */
       clear_content = msg->content;
   
-      if ((crypt_get_keys (msg, &pgpkeylist) == -1) ||
+      if ((crypt_get_keys (msg, &pgpkeylist, 0) == -1) ||
           mutt_protect (msg, pgpkeylist) == -1)
       {
         msg->content = mutt_remove_multipart (msg->content);
@@ -1857,12 +1891,17 @@ full_fcc:
   
 cleanup:
 
-  if ((WithCrypto & APPLICATION_PGP) && (flags & SENDPOSTPONED))
+  if (flags & SENDPOSTPONED)
   {
-    if(signas)
+    if (WithCrypto & APPLICATION_PGP)
     {
       FREE (&PgpSignAs);
-      PgpSignAs = signas;
+      PgpSignAs = pgp_signas;
+    }
+    if (WithCrypto & APPLICATION_SMIME)
+    {
+      FREE (&SmimeDefaultKey);
+      SmimeDefaultKey = smime_default_key;
     }
   }
    

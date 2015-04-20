@@ -138,6 +138,11 @@ if test x"$enable_gpgme" = xyes; then
       #needed to get GPGME_LIBS and al correctly
       AM_PATH_GPGME(1.0.0, AC_DEFINE(CRYPT_BACKEND_GPGME, 1,
                     [Define if you use GPGME to support OpenPGP]))
+      dnl AC_CHECK_FUNCS([gpgme_op_export_keys])
+      saved_LIBS="$LIBS"
+      LIBS="$LIBS $GPGME_LIBS"
+      AC_CHECK_FUNCS([gpgme_op_export_keys])
+      LIBS="$saved_LIBS"
       MUTT_LIB_OBJECTS="$MUTT_LIB_OBJECTS crypt-gpgme.o crypt-mod-pgp-gpgme.o crypt-mod-smime-gpgme.o"
    fi
 else
@@ -163,7 +168,7 @@ AC_ARG_ENABLE(smime, AS_HELP_STRING([--disable-smime],[Disable SMIME support]),
 ])
  
 if test x$have_smime != xno ; then
-	AC_DEFINE(CRYPT_BACKEND_CLASSIC_SMIME, 1, [Define if you want clasic S/MIME support.])
+	AC_DEFINE(CRYPT_BACKEND_CLASSIC_SMIME, 1, [Define if you want classic S/MIME support.])
 	MUTT_LIB_OBJECTS="$MUTT_LIB_OBJECTS smime.o crypt-mod-smime-classic.o"
 	SMIMEAUX_TARGET="smime_keys"
 fi
@@ -732,6 +737,16 @@ then
       AC_CHECK_DECLS([GNUTLS_VERIFY_DISABLE_TIME_CHECKS], [], [],
                     [[#include <gnutls/x509.h>]])
 
+      LIBS="$LIBS -lgnutls"
+      AC_CHECK_FUNCS(gnutls_priority_set_direct)
+      AC_CHECK_TYPES([gnutls_certificate_credentials_t,
+                      gnutls_certificate_status_t,
+                      gnutls_datum_t,
+                      gnutls_digest_algorithm_t,
+                      gnutls_session_t,
+                      gnutls_transport_ptr_t,
+                      gnutls_x509_crt_t], [], [], [[#include <gnutls/gnutls.h>]])
+
       LIBS="$saved_LIBS"
       MUTTLIBS="$MUTTLIBS -lgnutls"
 
@@ -1210,7 +1225,7 @@ if test "x$with_idn" != "xno"; then
     ])
 
     if test "$with_idn" != auto; then
-      if test $have_stringprep_h = no || test $have_idna_h = no || test $ac_cv_search_STRINGPREP_CHECK_VERSION = no; then
+      if test $have_stringprep_h = no || test $have_idna_h = no || test $ac_cv_search_stringprep_check_version = no; then
 	AC_MSG_ERROR([IDN was requested, but libidn was not usable on this system])
       fi
     fi

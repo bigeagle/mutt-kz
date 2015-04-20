@@ -1814,7 +1814,14 @@ static int write_one_header (FILE *fp, int pfxw, int max, int wraplen,
     {
       tagbuf = mutt_substrdup (start, t);
       /* skip over the colon separating the header field name and value */
-      t = skip_email_wsp(t + 1);
+      ++t;
+
+      /* skip over any leading whitespace (WSP, as defined in RFC5322)
+       * NOTE: skip_email_wsp() does the wrong thing here.
+       *       See tickets 3609 and 3716. */
+      while (*t == ' ' || *t == '\t')
+        t++;
+
       valbuf = mutt_substrdup (t, end);
     }
     dprint(4,(debugfile,"mwoh: buf[%s%s] too long, "
@@ -2690,6 +2697,7 @@ int mutt_write_fcc (const char *path, HEADER *hdr, const char *msgid,
   int r, need_buffy_cleanup = 0;
   struct stat st;
   char buf[SHORT_STRING];
+  int onm_flags;
 
   if (post)
     set_noconv_flags (hdr->content, 1);
@@ -2719,7 +2727,10 @@ int mutt_write_fcc (const char *path, HEADER *hdr, const char *msgid,
   }
 
   hdr->read = !post; /* make sure to put it in the `cur' directory (maildir) */
-  if ((msg = mx_open_new_message (&f, hdr, M_ADD_FROM)) == NULL)
+  onm_flags = M_ADD_FROM;
+  if (post)
+    onm_flags |= M_SET_DRAFT;
+  if ((msg = mx_open_new_message (&f, hdr, onm_flags)) == NULL)
   {
     mx_close_mailbox (&f, NULL);
     return (-1);

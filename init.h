@@ -492,6 +492,23 @@ struct option_t MuttVars[] = {
   ** $$crypt_replyencrypt,
   ** $$crypt_autosign, $$crypt_replysign and $$smime_is_default.
   */
+  { "crypt_opportunistic_encrypt", DT_BOOL, R_NONE, OPTCRYPTOPPORTUNISTICENCRYPT, 0 },
+  /*
+  ** .pp
+  ** Setting this variable will cause Mutt to automatically enable and
+  ** disable encryption, based on whether all message recipient keys
+  ** can be located by mutt.
+  ** .pp
+  ** When this option is enabled, mutt will determine the encryption
+  ** setting each time the TO, CC, and BCC lists are edited.  If
+  ** $$edit_headers is set, mutt will also do so each time the message
+  ** is edited.  If you wish to manually enable/disable encryption with
+  ** this option set, you should do so after editing the message and
+  ** recipients, to avoid mutt changing your setting.
+  ** .pp
+  ** \fBNote:\fP this option has no effect when $$crypt_autoencrypt is enabled.
+  ** (Crypto only)
+   */
   { "pgp_replyencrypt",		DT_SYN,  R_NONE, UL "crypt_replyencrypt", 1  },
   { "crypt_replyencrypt",	DT_BOOL, R_NONE, OPTCRYPTREPLYENCRYPT, 1 },
   /*
@@ -2065,23 +2082,25 @@ struct option_t MuttVars[] = {
   { "sidebar_width", DT_NUM, R_BOTH, UL &SidebarWidth, 0 },
   /*
   ** .pp
-  ** Do not refresh sidebar in less than $sidebar_refresh seconds,
-  ** (0 disables refreshing).
+  ** The width of the sidebar.
   */
   { "sidebar_refresh", DT_NUM, R_BOTH, UL &SidebarRefresh, 60 },
   /*
   ** .pp
-  ** The width of the sidebar.
+  ** Do not refresh sidebar in less than $sidebar_refresh seconds,
+  ** (0 disables refreshing).
   */
   {"sidebar_newmail_only", DT_BOOL, R_BOTH, OPTSIDEBARNEWMAILONLY, 0 },
   /*
   ** .pp
-  ** Show only new mail in the sidebar.
+  ** Show only new and flagged mail in the sidebar.
   */
   { "pgp_use_gpg_agent", DT_BOOL, R_NONE, OPTUSEGPGAGENT, 0},
   /*
   ** .pp
   ** If \fIset\fP, mutt will use a possibly-running \fCgpg-agent(1)\fP process.
+  ** Note that as of version 2.1, GnuPG no longer exports GPG_AGENT_INFO, so
+  ** mutt no longer verifies if the agent is running.
   ** (PGP only)
   */
   { "pgp_verify_command", 	DT_STR, R_NONE, UL &PgpVerifyCommand, 0},
@@ -2232,6 +2251,21 @@ struct option_t MuttVars[] = {
   ** in the mailbox specified by this variable.
   ** .pp
   ** Also see the $$postpone variable.
+  */
+  { "postpone_encrypt",    DT_BOOL, R_NONE, OPTPOSTPONEENCRYPT, 0 },
+  /*
+  ** .pp
+  ** When \fIset\fP, postponed messages that are marked for encryption will be
+  ** encrypted using the key in $$postpone_encrypt_as before saving.
+  ** (Crypto only)
+  */
+  { "postpone_encrypt_as", DT_STR,  R_NONE, UL &PostponeEncryptAs, 0 },
+  /*
+  ** .pp
+  ** This is the key used to encrypt postponed messages.  It should be in
+  ** keyid form (e.g. 0x00112233 for PGP or the hash-value that OpenSSL
+  ** generates for S/MIME).
+  ** (Crypto only)
   */
 #ifdef USE_SOCKET
   { "preconnect",	DT_STR, R_NONE, UL &Preconnect, UL 0},
@@ -2782,12 +2816,11 @@ struct option_t MuttVars[] = {
   ** possible \fCprintf(3)\fP-like sequences.
   ** (S/MIME only)
   */
-  { "smime_encrypt_with",	DT_STR,	 R_NONE, UL &SmimeCryptAlg, 0 },
+  { "smime_encrypt_with",	DT_STR,	 R_NONE, UL &SmimeCryptAlg, UL "aes256" },
   /*
   ** .pp
   ** This sets the algorithm that should be used for encryption.
-  ** Valid choices are ``des'', ``des3'', ``rc2-40'', ``rc2-64'', ``rc2-128''.
-  ** If \fIunset\fP, ``3des'' (TripleDES) is used.
+  ** Valid choices are ``aes128'', ``aes192'', ``aes256'', ``des'', ``des3'', ``rc2-40'', ``rc2-64'', ``rc2-128''.
   ** (S/MIME only)
   */
   { "smime_get_cert_command", 	DT_STR, R_NONE, UL &SmimeGetCertCommand, 0},
@@ -3125,14 +3158,16 @@ struct option_t MuttVars[] = {
   /*
   ** .pp
   ** This variable specifies whether to attempt to use SSLv2 in the
-  ** SSL authentication process.
+  ** SSL authentication process. Note that SSLv2 and SSLv3 are now
+  ** considered fundamentally insecure and are no longer recommended.
   */
 # endif /* defined USE_SSL_OPENSSL */
-  { "ssl_use_sslv3", DT_BOOL, R_NONE, OPTSSLV3, 1 },
+  { "ssl_use_sslv3", DT_BOOL, R_NONE, OPTSSLV3, 0 },
   /*
   ** .pp
   ** This variable specifies whether to attempt to use SSLv3 in the
-  ** SSL authentication process.
+  ** SSL authentication process. Note that SSLv2 and SSLv3 are now
+  ** considered fundamentally insecure and are no longer recommended.
   */
   { "ssl_use_tlsv1", DT_BOOL, R_NONE, OPTTLSV1, 1 },
   /*
@@ -3741,6 +3776,7 @@ const struct command_t Commands[] = {
   { "send-hook",	mutt_parse_hook,	M_SENDHOOK },
   { "send2-hook",	mutt_parse_hook,	M_SEND2HOOK },
   { "set",		parse_set,		0 },
+  { "sidebar_whitelist",parse_list,		UL &SidebarWhitelist },
   { "source",		parse_source,		0 },
   { "spam",		parse_spam_list,	M_SPAM },
   { "nospam",		parse_spam_list,	M_NOSPAM },

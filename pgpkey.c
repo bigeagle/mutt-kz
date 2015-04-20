@@ -228,7 +228,7 @@ static const char *pgp_entry_fmt (char *dest,
       if (!optional)
       {
 	snprintf (fmt, sizeof (fmt), "%%%ss", prefix);
-	snprintf (dest, destlen, fmt, uid->addr);
+	snprintf (dest, destlen, fmt, NONULL (uid->addr));
       }
       break;
     case 'a':
@@ -586,7 +586,7 @@ static pgp_key_t pgp_select_key (pgp_key_t keys,
 
     case OP_VIEW_ID:
 
-      mutt_message ("%s", KeyTable[menu->current]->addr);
+      mutt_message ("%s", NONULL (KeyTable[menu->current]->addr));
       break;
 
     case OP_GENERIC_SELECT_ENTRY:
@@ -812,7 +812,8 @@ static pgp_key_t *pgp_get_lastp (pgp_key_t p)
   return NULL;
 }
 
-pgp_key_t pgp_getkeybyaddr (ADDRESS * a, short abilities, pgp_ring_t keyring)
+pgp_key_t pgp_getkeybyaddr (ADDRESS * a, short abilities, pgp_ring_t keyring,
+                            int auto_mode)
 {
   ADDRESS *r, *p;
   LIST *hints = NULL;
@@ -821,7 +822,8 @@ pgp_key_t pgp_getkeybyaddr (ADDRESS * a, short abilities, pgp_ring_t keyring)
   int match;
 
   pgp_key_t keys, k, kn;
-  pgp_key_t the_valid_key = NULL;
+  pgp_key_t the_strong_valid_key = NULL;
+  pgp_key_t a_valid_addrmatch_key = NULL;
   pgp_key_t matches = NULL;
   pgp_key_t *last = &matches;
   pgp_uid_t *q;
@@ -831,7 +833,8 @@ pgp_key_t pgp_getkeybyaddr (ADDRESS * a, short abilities, pgp_ring_t keyring)
   if (a && a->personal)
     hints = pgp_add_string_to_hints (hints, a->personal);
 
-  mutt_message (_("Looking for keys matching \"%s\"..."), a->mailbox);
+  if (! auto_mode )
+    mutt_message (_("Looking for keys matching \"%s\"..."), a->mailbox);
   keys = pgp_get_candidates (keyring, hints);
 
   mutt_free_list (&hints);
@@ -870,14 +873,20 @@ pgp_key_t pgp_getkeybyaddr (ADDRESS * a, short abilities, pgp_ring_t keyring)
 	if (validity & PGP_KV_MATCH)	/* something matches */
 	  match = 1;
 
-	/* is this key a strong candidate? */
-	if ((validity & PGP_KV_VALID) && (validity & PGP_KV_STRONGID) 
-	    && (validity & PGP_KV_ADDR))
-	{
-	  if (the_valid_key && the_valid_key != k)
-	    multi             = 1;
-	  the_valid_key       = k;
-	}
+        if ((validity & PGP_KV_VALID)
+            && (validity & PGP_KV_ADDR))
+        {
+          if (validity & PGP_KV_STRONGID)
+          {
+            if (the_strong_valid_key && the_strong_valid_key != k)
+              multi = 1;
+            the_strong_valid_key = k;
+          }
+          else
+          {
+            a_valid_addrmatch_key = k;
+          }
+        }
       }
 
       rfc822_free_address (&r);
@@ -895,16 +904,30 @@ pgp_key_t pgp_getkeybyaddr (ADDRESS * a, short abilities, pgp_ring_t keyring)
 
   if (matches)
   {
-    if (the_valid_key && !multi)
+    if (auto_mode)
+    {
+      if (the_strong_valid_key)
+      {
+        pgp_remove_key (&matches, the_strong_valid_key);
+        k = the_strong_valid_key;
+      }
+      else if (a_valid_addrmatch_key)
+      {
+        pgp_remove_key (&matches, a_valid_addrmatch_key);
+        k = a_valid_addrmatch_key;
+      }
+      else
+        k = NULL;
+    }
+    else if (the_strong_valid_key && !multi)
     {
       /*
        * There was precisely one strong match on a valid ID.
        * 
        * Proceed without asking the user.
        */
-      pgp_remove_key (&matches, the_valid_key);
-      pgp_free_key (&matches);
-      k = the_valid_key;
+      pgp_remove_key (&matches, the_strong_valid_key);
+      k = the_strong_valid_key;
     }
     else 
     {
@@ -913,8 +936,9 @@ pgp_key_t pgp_getkeybyaddr (ADDRESS * a, short abilities, pgp_ring_t keyring)
        */
       if ((k = pgp_select_key (matches, a, NULL)))
 	pgp_remove_key (&matches, k);
-      pgp_free_key (&matches);
     }
+
+    pgp_free_key (&matches);
 
     return k;
   }
@@ -932,6 +956,7 @@ pgp_key_t pgp_getkeybystr (char *p, short abilities, pgp_ring_t keyring)
   pgp_uid_t *a;
   short match;
   size_t l;
+  const char *ps, *pl;
 
   if ((l = mutt_strlen (p)) && p[l-1] == '!')
     p[l-1] = 0;
@@ -945,27 +970,54 @@ pgp_key_t pgp_getkeybystr (char *p, short abilities, pgp_ring_t keyring)
   if (!keys)
     goto out;
 
+  /* User input may be short or long key ID, independent of OPTPGPLONGIDS.
+   * pgp_key_t->keyid should always contain a long key ID without 0x.
+   * Strip leading "0x" before loops so it doesn't have to be done over and
+   * over again, and prepare pl and ps to simplify logic in the loop's inner
+   * condition.
+   */
+  pl = (!mutt_strncasecmp (p, "0x", 2) ? p + 2 : p);
+  ps = (mutt_strlen (pl) == 16 ? pl + 8 : pl);
+
   for (k = keys; k; k = kn)
   {
     kn = k->next;
     if (abilities && !(k->flags & abilities))
       continue;
 
+    /* This shouldn't happen, but keys without any addresses aren't selectable
+     * in pgp_select_key().
+     */
+    if (!k->address)
+      continue;
+
     match = 0;
 
-    for (a = k->address; a; a = a->next)
+    dprint (5, (debugfile, "pgp_getkeybystr: matching \"%s\" against key %s:\n",
+                p, pgp_long_keyid (k)));
+
+    /* If ps != pl it means a long ID (or name of 16 characters) was given, do
+     * not attempt to match short IDs then. Also, it is unnecessary to try to
+     * match pl against long IDs if ps == pl as pl could not be a long ID. */
+    if (!*p ||
+        (ps != pl && mutt_strcasecmp (pl, pgp_long_keyid (k)) == 0) ||
+        (ps == pl && mutt_strcasecmp (ps, pgp_short_keyid (k)) == 0))
     {
-      dprint (5, (debugfile, "pgp_getkeybystr: matching \"%s\" against key %s, \"%s\": ",
-		  p, pgp_keyid (k), a->addr));
-      if (!*p || mutt_strcasecmp (p, pgp_keyid (k)) == 0 ||
-	  (!mutt_strncasecmp (p, "0x", 2) && !mutt_strcasecmp (p + 2, pgp_keyid (k))) ||
-	  (option (OPTPGPLONGIDS) && !mutt_strncasecmp (p, "0x", 2) &&
-	   !mutt_strcasecmp (p + 2, k->keyid + 8)) ||
-	  mutt_stristr (a->addr, p))
+      dprint (5, (debugfile, "\t\tmatch.\n"));
+      match = 1;
+    }
+    else
+    {
+      for (a = k->address; a; a = a->next)
       {
-	dprint (5, (debugfile, "match.\n"));
-	match = 1;
-	break;
+        dprint (5, (debugfile, "pgp_getkeybystr: matching \"%s\" against key %s, \"%s\":\n",
+                    p, pgp_long_keyid (k), NONULL (a->addr)));
+        if (mutt_stristr (a->addr, p))
+        {
+          dprint (5, (debugfile, "\t\tmatch.\n"));
+          match = 1;
+          break;
+        }
       }
     }
 
@@ -985,13 +1037,13 @@ pgp_key_t pgp_getkeybystr (char *p, short abilities, pgp_ring_t keyring)
       pgp_remove_key (&matches, k);
 
     pgp_free_key (&matches);
-    if (!p[l-1])
+    if (l && !p[l-1])
       p[l-1] = '!';
     return k;
   }
 
 out:
-  if (!p[l-1])
+  if (l && !p[l-1])
     p[l-1] = '!';
   return NULL;
 }
