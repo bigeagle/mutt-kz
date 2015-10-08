@@ -1728,7 +1728,7 @@ static int fold_one_header (FILE *fp, const char *tag, const char *value,
 
   /* if we have printed something but didn't \n-terminate it, do it
    * except the last word we printed ended in \n already */
-  if (col && buf[l - 1] != '\n')
+  if (col && (l == 0 || buf[l - 1] != '\n'))
     if (putc ('\n', fp) == EOF)
       return -1;
 
@@ -2771,6 +2771,8 @@ int mutt_write_fcc (const char *path, HEADER *hdr, const char *msgid,
     fputs ("X-Mutt-PGP: ", msg->fp);
     if (hdr->security & ENCRYPT)
       fputc ('E', msg->fp);
+    if (hdr->security & OPPENCRYPT)
+      fputc ('O', msg->fp);
     if (hdr->security & SIGN)
     {
       fputc ('S', msg->fp);
@@ -2792,6 +2794,8 @@ int mutt_write_fcc (const char *path, HEADER *hdr, const char *msgid,
 	if (SmimeCryptAlg && *SmimeCryptAlg)
 	    fprintf (msg->fp, "C<%s>", SmimeCryptAlg);
     }
+    if (hdr->security & OPPENCRYPT)
+      fputc ('O', msg->fp);
     if (hdr->security & SIGN) {
 	fputc ('S', msg->fp);
 	if (SmimeDefaultKey && *SmimeDefaultKey)

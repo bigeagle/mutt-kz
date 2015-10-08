@@ -37,6 +37,8 @@ char *_pgp_keyid (pgp_key_t);
 char *pgp_keyid (pgp_key_t);
 char *pgp_short_keyid (pgp_key_t);
 char *pgp_long_keyid (pgp_key_t);
+char *pgp_fingerprint (pgp_key_t k);
+char *pgp_fpr_or_lkeyid (pgp_key_t k);
 
 
 int mutt_check_pgp (HEADER * h);
@@ -51,7 +53,7 @@ pgp_key_t pgp_get_candidates (pgp_ring_t, LIST *);
 pgp_key_t pgp_getkeybyaddr (ADDRESS *, short, pgp_ring_t, int);
 pgp_key_t pgp_getkeybystr (char *, short, pgp_ring_t);
 
-char *pgp_findKeys (ADDRESS *adrlist, int auto_mode);
+char *pgp_findKeys (ADDRESS *adrlist, int oppenc_mode);
 
 void pgp_forget_passphrase (void);
 int pgp_application_pgp_handler (BODY *, STATE *);

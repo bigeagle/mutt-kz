@@ -110,6 +110,7 @@ typedef struct crypt_keyinfo
   int idx;             /* and the user ID at this index */
   const char *uid;     /* and for convenience point to this user ID */
   unsigned int flags;  /* global and per uid flags (for convenience)*/
+  gpgme_validity_t validity;  /* uid validity (cached for convenience) */
 } crypt_key_t;
 
 typedef struct crypt_entry
@@ -218,6 +219,24 @@ static const char *crypt_fpr (crypt_key_t *k)
   return s;
 }
 
+/* Returns the fingerprint if available, otherwise
+ * returns the long keyid.
+ */
+static const char *crypt_fpr_or_lkeyid(crypt_key_t *k)
+{
+  const char *s = "????????????????";
+
+  if (k->kobj && k->kobj->subkeys)
+  {
+    if (k->kobj->subkeys->fpr)
+      s = k->kobj->subkeys->fpr;
+    else
+      s = k->kobj->subkeys->keyid;
+  }
+
+  return s;
+}
+
 /* Parse FLAGS and return a statically allocated(!) string with them. */
 static char *crypt_key_abilities (int flags)
 {
@@ -268,6 +287,7 @@ static crypt_key_t *crypt_copy_key (crypt_key_t *key)
   k->idx = key->idx;
   k->uid = key->uid;
   k->flags = key->flags;
+  k->validity = key->validity;
 
   return k;
 }
@@ -302,21 +322,12 @@ static int crypt_key_is_valid (crypt_key_t *k)
 /* Return true whe validity of KEY is sufficient. */
 static int crypt_id_is_strong (crypt_key_t *key)
 {
-  gpgme_validity_t val = GPGME_VALIDITY_UNKNOWN;
-  gpgme_user_id_t uid = NULL;
   unsigned int is_strong = 0;
-  unsigned int i = 0;
 
   if ((key->flags & KEYFLAG_ISX509))
     return 1;
 
-  for (i = 0, uid = key->kobj->uids; (i < key->idx) && uid;
-       i++, uid = uid->next)
-    ;
-  if (uid)
-    val = uid->validity;
-
-  switch (val)
+  switch (key->validity)
     {
     case GPGME_VALIDITY_UNKNOWN:
     case GPGME_VALIDITY_UNDEFINED:
@@ -2841,35 +2852,28 @@ static const char *crypt_entry_fmt (char *dest,
         s = "x";
       else
 	{
-	  gpgme_user_id_t uid = NULL;
-	  unsigned int i = 0;
-
-	  for (i = 0, uid = key->kobj->uids; uid && (i < key->idx);
-               i++, uid = uid->next)
-            ;
-	  if (uid)
-	    switch (uid->validity)
-	      {
-	      case GPGME_VALIDITY_UNDEFINED:
-		s = "q";
-		break;
-	      case GPGME_VALIDITY_NEVER:
-		s = "n";
-		break;
-	      case GPGME_VALIDITY_MARGINAL:
-		s = "m";
-		break;
-	      case GPGME_VALIDITY_FULL:
-		s = "f";
-		break;
-	      case GPGME_VALIDITY_ULTIMATE:
-		s = "u";
-		break;
-	      case GPGME_VALIDITY_UNKNOWN:
-	      default:
-		s = "?";
-		break;
-	      }
+          switch (key->validity)
+            {
+            case GPGME_VALIDITY_UNDEFINED:
+              s = "q";
+              break;
+            case GPGME_VALIDITY_NEVER:
+              s = "n";
+              break;
+            case GPGME_VALIDITY_MARGINAL:
+              s = "m";
+              break;
+            case GPGME_VALIDITY_FULL:
+              s = "f";
+              break;
+            case GPGME_VALIDITY_ULTIMATE:
+              s = "u";
+              break;
+            case GPGME_VALIDITY_UNKNOWN:
+            default:
+              s = "?";
+              break;
+            }
 	}
       snprintf (fmt, sizeof (fmt), "%%%sc", prefix);
       snprintf (dest, destlen, fmt, s? *s: 'B');
@@ -2914,7 +2918,7 @@ static int _crypt_compare_address (const void *a, const void *b)
   if ((r = mutt_strcasecmp ((*s)->uid, (*t)->uid)))
     return r > 0;
   else
-    return mutt_strcasecmp (crypt_keyid (*s), crypt_keyid (*t)) > 0;
+    return mutt_strcasecmp (crypt_fpr_or_lkeyid (*s), crypt_fpr_or_lkeyid (*t)) > 0;
 }
 
 static int crypt_compare_address (const void *a, const void *b)
@@ -2931,7 +2935,7 @@ static int _crypt_compare_keyid (const void *a, const void *b)
   crypt_key_t **t = (crypt_key_t **) b;
   int r;
 
-  if ((r = mutt_strcasecmp (crypt_keyid (*s), crypt_keyid (*t))))
+  if ((r = mutt_strcasecmp (crypt_fpr_or_lkeyid (*s), crypt_fpr_or_lkeyid (*t))))
     return r > 0;
   else
     return mutt_strcasecmp ((*s)->uid, (*t)->uid) > 0;
@@ -2982,10 +2986,8 @@ static int _crypt_compare_trust (const void *a, const void *b)
 	    - ((*t)->flags & (KEYFLAG_RESTRICTIONS)))))
     return r > 0;
 
-  if ((*s)->kobj->uids)
-    ts = (*s)->kobj->uids->validity;
-  if ((*t)->kobj->uids)
-    tt = (*t)->kobj->uids->validity;
+  ts = (*s)->validity;
+  tt = (*t)->validity;
   if ((r = (tt - ts)))
     return r < 0;
 
@@ -3007,7 +3009,7 @@ static int _crypt_compare_trust (const void *a, const void *b)
 
   if ((r = mutt_strcasecmp ((*s)->uid, (*t)->uid)))
     return r > 0;
-  return (mutt_strcasecmp (crypt_keyid ((*s)), crypt_keyid ((*t)))) > 0;
+  return (mutt_strcasecmp (crypt_fpr_or_lkeyid ((*s)), crypt_fpr_or_lkeyid ((*t)))) > 0;
 }
 
 static int crypt_compare_trust (const void *a, const void *b)
@@ -3751,6 +3753,13 @@ static crypt_key_t *get_candidates (LIST * hints, unsigned int app, int secret)
 	  if (key_check_cap (key, KEY_CAP_CAN_SIGN))
             flags |= KEYFLAG_CANSIGN;
 
+          if (key->revoked)
+            flags |= KEYFLAG_REVOKED;
+          if (key->expired)
+            flags |= KEYFLAG_EXPIRED;
+          if (key->disabled)
+            flags |= KEYFLAG_DISABLED;
+
 #if 0 /* DISABLED code */
           if (!flags)
             {
@@ -3781,6 +3790,9 @@ static crypt_key_t *get_candidates (LIST * hints, unsigned int app, int secret)
               k->idx = idx;
               k->uid = uid->uid;
               k->flags = flags;
+              if (uid->revoked)
+                k->flags |= KEYFLAG_REVOKED;
+              k->validity = uid->validity;
               *kend = k;
               kend = &k->next;
             }
@@ -3824,6 +3836,7 @@ static crypt_key_t *get_candidates (LIST * hints, unsigned int app, int secret)
               k->idx = idx;
               k->uid = uid->uid;
               k->flags = flags;
+              k->validity = uid->validity;
               *kend = k;
               kend = &k->next;
             }
@@ -4003,23 +4016,11 @@ static crypt_key_t *crypt_select_key (crypt_key_t *keys,
               char buff[LONG_STRING];
               
               if (key_table[menu->current]->flags & KEYFLAG_CANTUSE)
-                s = N_("ID is expired/disabled/revoked.");
+                warn_s = N_("ID is expired/disabled/revoked.");
               else 
                 {
-		  gpgme_validity_t val = GPGME_VALIDITY_UNKNOWN;
-		  gpgme_user_id_t uid = NULL;
-		  unsigned int j = 0;
-
                   warn_s = "??";
-
-		  uid = key_table[menu->current]->kobj->uids;
-		  for (j = 0; (j < key_table[menu->current]->idx) && uid;
-                       j++, uid = uid->next)
-                    ;
-		  if (uid)
-		    val = uid->validity;
-
-                  switch (val)
+                  switch (key_table[menu->current]->validity)
                     {
                     case GPGME_VALIDITY_UNKNOWN:   
                     case GPGME_VALIDITY_UNDEFINED: 
@@ -4035,18 +4036,18 @@ static crypt_key_t *crypt_select_key (crypt_key_t *keys,
                     case GPGME_VALIDITY_ULTIMATE:  
                       break;
                     }
-
-                  snprintf (buff, sizeof (buff),
-                            _("%s Do you really want to use the key?"),
-                            _(warn_s));
-		  
-                  if (mutt_yesorno (buff, 0) != 1)
-                    {
-                      mutt_clear_error ();
-                      break;
-                    }
-                  *forced_valid = 1;
                 }
+
+              snprintf (buff, sizeof (buff),
+                        _("%s Do you really want to use the key?"),
+                        _(warn_s));
+              
+              if (mutt_yesorno (buff, 0) != 1)
+                {
+                  mutt_clear_error ();
+                  break;
+                }
+              *forced_valid = 1;
             }  
 
           k = crypt_copy_key (key_table[menu->current]);
@@ -4070,7 +4071,7 @@ static crypt_key_t *crypt_select_key (crypt_key_t *keys,
 
 static crypt_key_t *crypt_getkeybyaddr (ADDRESS * a, short abilities,
 					unsigned int app, int *forced_valid,
-					int auto_mode)
+					int oppenc_mode)
 {
   ADDRESS *r, *p;
   LIST *hints = NULL;
@@ -4098,7 +4099,7 @@ static crypt_key_t *crypt_getkeybyaddr (ADDRESS * a, short abilities,
   if (a && a->personal)
     hints = crypt_add_string_to_hints (hints, a->personal);
 
-  if (! auto_mode )
+  if (! oppenc_mode )
     mutt_message (_("Looking for keys matching \"%s\"..."), a->mailbox);
   keys = get_candidates (hints, app, (abilities & KEYFLAG_CANSIGN) );
 
@@ -4185,7 +4186,7 @@ static crypt_key_t *crypt_getkeybyaddr (ADDRESS * a, short abilities,
   
   if (matches)
     {
-      if (auto_mode)
+      if (oppenc_mode)
         {
           if (the_strong_valid_key)
             k = crypt_copy_key (the_strong_valid_key);
@@ -4213,6 +4214,7 @@ static crypt_key_t *crypt_getkeybyaddr (ADDRESS * a, short abilities,
            */
           k = crypt_select_key (matches, a, NULL, app, forced_valid);
         }
+
       crypt_free_key (&matches);
     }
   else 
@@ -4222,7 +4224,7 @@ static crypt_key_t *crypt_getkeybyaddr (ADDRESS * a, short abilities,
 }
 
 
-static crypt_key_t *crypt_getkeybystr (const char *p, short abilities,
+static crypt_key_t *crypt_getkeybystr (char *p, short abilities,
 				       unsigned int app, int *forced_valid)
 {
   LIST *hints = NULL;
@@ -4230,32 +4232,23 @@ static crypt_key_t *crypt_getkeybystr (const char *p, short abilities,
   crypt_key_t *matches = NULL;
   crypt_key_t **matches_endp = &matches;
   crypt_key_t *k;
-  const char *ps, *pl;
+  const char *ps, *pl, *pfcopy, *phint;
 
   mutt_message (_("Looking for keys matching \"%s\"..."), p);
 
   *forced_valid = 0;
 
-  hints = crypt_add_string_to_hints (hints, p);
+  pfcopy = crypt_get_fingerprint_or_id (p, &phint, &pl, &ps);
+  hints = crypt_add_string_to_hints (hints, phint);
   keys = get_candidates (hints, app, (abilities & KEYFLAG_CANSIGN));
   mutt_free_list (&hints);
 
   if (!keys)
+  {
+    FREE (&pfcopy);
     return NULL;
+  }
 
-  /* User input may be short or long key ID, independent of OPTPGPLONGIDS.
-   * crypt_key_t->keyid should always contain a long key ID without 0x.
-   * Strip leading "0x" before loops so it doesn't have to be done over and
-   * over again, and prepare pl and ps to simplify logic in the loop's inner
-   * condition.
-   */
-  pl = (!mutt_strncasecmp (p, "0x", 2) ? p + 2 : p);
-  ps = (mutt_strlen (pl) == 16 ? pl + 8 : pl);
-
-  /* If ps != pl it means a long ID (or name of 16 characters) was given, do
-   * not attempt to match short IDs then. Also, it is unnecessary to try to
-   * match pl against long IDs if ps == pl as pl could not be a long ID. */
-  
   for (k = keys; k; k = k->next)
     {
       if (abilities && !(k->flags & abilities))
@@ -4265,8 +4258,9 @@ static crypt_key_t *crypt_getkeybystr (const char *p, short abilities,
                   "key %s, \"%s\": ",  p, crypt_long_keyid (k), k->uid));
 
       if (!*p
-          || (ps != pl && mutt_strcasecmp (pl, crypt_long_keyid (k)) == 0)
-          || (ps == pl && mutt_strcasecmp (ps, crypt_short_keyid (k)) == 0)
+          || (pfcopy && mutt_strcasecmp (pfcopy, crypt_fpr (k)) == 0)
+          || (pl && mutt_strcasecmp (pl, crypt_long_keyid (k)) == 0)
+          || (ps && mutt_strcasecmp (ps, crypt_short_keyid (k)) == 0)
           || mutt_stristr (k->uid, p))
         {
           crypt_key_t *tmp;
@@ -4278,6 +4272,7 @@ static crypt_key_t *crypt_getkeybystr (const char *p, short abilities,
         }
     }
   
+  FREE (&pfcopy);
   crypt_free_key (&keys);
   
   if (matches)
@@ -4355,10 +4350,12 @@ static crypt_key_t *crypt_ask_for_key (char *tag,
 
 /* This routine attempts to find the keyids of the recipients of a
    message.  It returns NULL if any of the keys can not be found.
-   If auto_mode is true, only keys that can be determined without
+   If oppenc_mode is true, only keys that can be determined without
    prompting will be used.  */
-static char *find_keys (ADDRESS *adrlist, unsigned int app, int auto_mode)
+static char *find_keys (ADDRESS *adrlist, unsigned int app, int oppenc_mode)
 {
+  LIST *crypt_hook_list, *crypt_hook = NULL;
+  char *crypt_hook_val = NULL;
   const char *keyID = NULL;
   char *keylist = NULL, *t;
   size_t keylist_size = 0;
@@ -4367,6 +4364,10 @@ static char *find_keys (ADDRESS *adrlist, unsigned int app, int auto_mode)
   ADDRESS *p, *q;
   crypt_key_t *k_info;
   const char *fqdn = mutt_fqdn (1);
+  char buf[LONG_STRING];
+  int forced_valid;
+  int r;
+  int key_selected;
 
 #if 0
   *r_application = APPLICATION_PGP|APPLICATION_SMIME;
@@ -4374,116 +4375,139 @@ static char *find_keys (ADDRESS *adrlist, unsigned int app, int auto_mode)
 
   for (p = adrlist; p ; p = p->next)
     {
-      char buf[LONG_STRING];
-      int forced_valid = 0;
-      
-      q = p;
-      k_info = NULL;
-      
-      if ((keyID = mutt_crypt_hook (p)) != NULL)
-        {
-          int r = M_NO;
-          if (! auto_mode)
-            {
-              snprintf (buf, sizeof (buf), _("Use keyID = \"%s\" for %s?"),
-                        keyID, p->mailbox);
-              r = mutt_yesorno (buf, M_YES);
-            }
-          if (auto_mode || (r == M_YES))
-            {
-              if (crypt_is_numerical_keyid (keyID))
-                {
-                  if (strncmp (keyID, "0x", 2) == 0)
-                    keyID += 2;
-                  goto bypass_selection;                /* you don't see this. */
-                }
+      key_selected = 0;
+      crypt_hook_list = crypt_hook = mutt_crypt_hook (p);
+      do
+      {
+        q = p;
+        forced_valid = 0;
+        k_info = NULL;
 
-              /* check for e-mail address */
-              if ((t = strchr (keyID, '@')) && 
-                  (addr = rfc822_parse_adrlist (NULL, keyID)))
-                {
-                  if (fqdn)
-                    rfc822_qualify (addr, fqdn);
-                  q = addr;
-                }
-              else if (! auto_mode)
-		{
+        if (crypt_hook != NULL)
+          {
+            crypt_hook_val = crypt_hook->data;
+            r = M_YES;
+            if (! oppenc_mode && option(OPTCRYPTCONFIRMHOOK))
+              {
+                snprintf (buf, sizeof (buf), _("Use keyID = \"%s\" for %s?"),
+                          crypt_hook_val, p->mailbox);
+                r = mutt_yesorno (buf, M_YES);
+              }
+            if (r == M_YES)
+              {
+                if (crypt_is_numerical_keyid (crypt_hook_val))
+                  {
+                    keyID = crypt_hook_val;
+                    if (strncmp (keyID, "0x", 2) == 0)
+                      keyID += 2;
+                    goto bypass_selection;                /* you don't see this. */
+                  }
+
+                /* check for e-mail address */
+                if ((t = strchr (crypt_hook_val, '@')) && 
+                    (addr = rfc822_parse_adrlist (NULL, crypt_hook_val)))
+                  {
+                    if (fqdn)
+                      rfc822_qualify (addr, fqdn);
+                    q = addr;
+                  }
+                else if (! oppenc_mode)
+                  {
 #if 0		  
-		  k_info = crypt_getkeybystr (keyID, KEYFLAG_CANENCRYPT, 
-					      *r_application, &forced_valid);
+                    k_info = crypt_getkeybystr (crypt_hook_val, KEYFLAG_CANENCRYPT, 
+                                                *r_application, &forced_valid);
 #else
-		  k_info = crypt_getkeybystr (keyID, KEYFLAG_CANENCRYPT, 
-					      app, &forced_valid);
+                    k_info = crypt_getkeybystr (crypt_hook_val, KEYFLAG_CANENCRYPT, 
+                                                app, &forced_valid);
 #endif
-		}
-            }
-          else if (r == -1)
-            {
-              FREE (&keylist);
-              rfc822_free_address (&addr);
-              return NULL;
-            }
-        }
+                  }
+              }
+            else if (r == M_NO)
+              {
+                if (key_selected || (crypt_hook->next != NULL))
+                  {
+                    crypt_hook = crypt_hook->next;
+                    continue;
+                  }
+              }
+            else if (r == -1)
+              {
+                FREE (&keylist);
+                rfc822_free_address (&addr);
+                mutt_free_list (&crypt_hook_list);
+                return NULL;
+              }
+          }
 
-      if (k_info == NULL)
-        {
-          k_info = crypt_getkeybyaddr (q, KEYFLAG_CANENCRYPT,
-                                       app, &forced_valid, auto_mode);
-        }
+        if (k_info == NULL)
+          {
+            k_info = crypt_getkeybyaddr (q, KEYFLAG_CANENCRYPT,
+                                        app, &forced_valid, oppenc_mode);
+          }
 
-      if ((k_info == NULL) && (! auto_mode))
-        {
-          snprintf (buf, sizeof (buf), _("Enter keyID for %s: "), q->mailbox);
-          
-          k_info = crypt_ask_for_key (buf, q->mailbox,
-                                      KEYFLAG_CANENCRYPT,
+        if ((k_info == NULL) && (! oppenc_mode))
+          {
+            snprintf (buf, sizeof (buf), _("Enter keyID for %s: "), q->mailbox);
+            
+            k_info = crypt_ask_for_key (buf, q->mailbox,
+                                        KEYFLAG_CANENCRYPT,
 #if 0
-                                      *r_application,
+                                        *r_application,
 #else
-                                      app,
+                                        app,
 #endif
-                                      &forced_valid);
-        }
+                                        &forced_valid);
+          }
 
-      if (k_info == NULL)
-        {
-          FREE (&keylist);
-          rfc822_free_address (&addr);
-          return NULL;
-        }
+        if (k_info == NULL)
+          {
+            FREE (&keylist);
+            rfc822_free_address (&addr);
+            mutt_free_list (&crypt_hook_list);
+            return NULL;
+          }
 
 
-      keyID = crypt_fpr (k_info);
+        keyID = crypt_fpr_or_lkeyid (k_info);
 
 #if 0
-      if (k_info->flags & KEYFLAG_ISX509)
-        *r_application &= ~APPLICATION_PGP;
-      if (!(k_info->flags & KEYFLAG_ISX509))
-        *r_application &= ~APPLICATION_SMIME;
+        if (k_info->flags & KEYFLAG_ISX509)
+          *r_application &= ~APPLICATION_PGP;
+        if (!(k_info->flags & KEYFLAG_ISX509))
+          *r_application &= ~APPLICATION_SMIME;
 #endif
-      
-  bypass_selection:
-      keylist_size += mutt_strlen (keyID) + 4 + 1;
-      safe_realloc (&keylist, keylist_size);
-      sprintf (keylist + keylist_used, "%s0x%s%s", /* __SPRINTF_CHECKED__ */
-               keylist_used ? " " : "",  keyID,
-               forced_valid? "!":"");
-      keylist_used = mutt_strlen (keylist);
         
-      crypt_free_key (&k_info);
-      rfc822_free_address (&addr);
+    bypass_selection:
+        keylist_size += mutt_strlen (keyID) + 4 + 1;
+        safe_realloc (&keylist, keylist_size);
+        sprintf (keylist + keylist_used, "%s0x%s%s", /* __SPRINTF_CHECKED__ */
+                keylist_used ? " " : "",  keyID,
+                forced_valid? "!":"");
+        keylist_used = mutt_strlen (keylist);
+
+        key_selected = 1;
+
+        crypt_free_key (&k_info);
+        rfc822_free_address (&addr);
+
+        if (crypt_hook != NULL)
+          crypt_hook = crypt_hook->next;
+
+      } while (crypt_hook != NULL);
+
+      mutt_free_list (&crypt_hook_list);
     }
   return (keylist);
 }
 
-char *pgp_gpgme_findkeys (ADDRESS *adrlist, int auto_mode)
+char *pgp_gpgme_findkeys (ADDRESS *adrlist, int oppenc_mode)
 {
-  return find_keys (adrlist, APPLICATION_PGP, auto_mode);
+  return find_keys (adrlist, APPLICATION_PGP, oppenc_mode);
 }
 
-char *smime_gpgme_findkeys (ADDRESS *adrlist, int auto_mode)
+char *smime_gpgme_findkeys (ADDRESS *adrlist, int oppenc_mode)
 {
-  return find_keys (adrlist, APPLICATION_SMIME, auto_mode);
+  return find_keys (adrlist, APPLICATION_SMIME, oppenc_mode);
 }
 
 #ifdef HAVE_GPGME_OP_EXPORT_KEYS
@@ -4572,8 +4596,6 @@ static void init_pgp (void)
   if (gpgme_engine_check_version (GPGME_PROTOCOL_OpenPGP) != GPG_ERR_NO_ERROR)
   {
     mutt_error (_("GPGME: OpenPGP protocol not available"));
-    if (mutt_any_key_to_continue (NULL) == -1)
-      mutt_exit(1);
   }
 }
 
@@ -4582,8 +4604,6 @@ static void init_smime (void)
   if (gpgme_engine_check_version (GPGME_PROTOCOL_CMS) != GPG_ERR_NO_ERROR)
   {
     mutt_error (_("GPGME: CMS protocol not available"));
-    if (mutt_any_key_to_continue (NULL) == -1)
-      mutt_exit(1);
   }
 }
 
@@ -4603,82 +4623,147 @@ static int gpgme_send_menu (HEADER *msg, int *redraw, int is_smime)
 {
   crypt_key_t *p;
   char input_signas[SHORT_STRING];
+  char *prompt, *letters, *choices;
   int choice;
 
-  if (msg->security & APPLICATION_PGP)
-    is_smime = 0;
-  else if (msg->security & APPLICATION_SMIME)
-    is_smime = 1;
-
   if (is_smime)
-    choice = mutt_multi_choice (
-    _("S/MIME (e)ncrypt, (s)ign, sign (a)s, (b)oth, (p)gp or (c)lear?"),
-             _("esabpfc"));
-  else 
-    choice = mutt_multi_choice (
-    _("PGP (e)ncrypt, (s)ign, sign (a)s, (b)oth, s/(m)ime or (c)lear?"),
-                _("esabmfc"));
+    msg->security |= APPLICATION_SMIME;
+  else
+    msg->security |= APPLICATION_PGP;
 
-  switch (choice)
+  /*
+   * Opportunistic encrypt is controlling encryption.
+   * NOTE: "Signing" and "Clearing" only adjust the sign bit, so we have different
+   *       letter choices for those.
+   */
+  if (option (OPTCRYPTOPPORTUNISTICENCRYPT) && (msg->security & OPPENCRYPT))
   {
-  case 1: /* (e)ncrypt */
-    msg->security |= (is_smime ? SMIMEENCRYPT : PGPENCRYPT);
-    msg->security &= ~(is_smime ? SMIMESIGN : PGPSIGN);
-    break;
-
-  case 2: /* (s)ign */
-    msg->security |= (is_smime? SMIMESIGN :PGPSIGN);
-    msg->security &= ~(is_smime ? SMIMEENCRYPT : PGPENCRYPT);
-    break;
-
-  case 3: /* sign (a)s */
-/*      unset_option(OPTCRYPTCHECKTRUST); */
-    if ((p = crypt_ask_for_key (_("Sign as: "), NULL, KEYFLAG_CANSIGN,
-                                is_smime? APPLICATION_SMIME:APPLICATION_PGP,
-                                NULL)))
+    if (is_smime)
     {
-      snprintf (input_signas, sizeof (input_signas), "0x%s", crypt_keyid (p));
-      mutt_str_replace (is_smime? &SmimeDefaultKey : &PgpSignAs, input_signas);
-      crypt_free_key (&p); 
-      
-      msg->security |= (is_smime? SMIMESIGN:PGPSIGN);
+      prompt = _("S/MIME (s)ign, sign (a)s, (p)gp, (c)lear, or (o)ppenc mode off? ");
+      letters = _("sapfco");
+      choices = "SapFCo";
     }
-#if 0
     else
     {
-      msg->security &= (is_smime? ~SMIMESIGN : ~PGPSIGN);
+      prompt = _("PGP (s)ign, sign (a)s, s/(m)ime, (c)lear, or (o)ppenc mode off? ");
+      letters = _("samfco");
+      choices = "SamFCo";
     }
-#endif
-    *redraw = REDRAW_FULL;
-    break;
-
-  case 4: /* (b)oth */
-    msg->security = (is_smime? (SMIMEENCRYPT|SMIMESIGN):(PGPENCRYPT|PGPSIGN));
-    break;
-
-  case 5: /* (p)gp or s/(m)ime */
-    is_smime = !is_smime;
-    break;
-
-  case 6: /* (f)orget it */
-  case 7: /* (c)lear */
-    msg->security = 0;
-    break;
+  }
+  /*
+   * Opportunistic encryption option is set, but is toggled off
+   * for this message.
+   */
+  else if (option (OPTCRYPTOPPORTUNISTICENCRYPT))
+  {
+    if (is_smime)
+    {
+      prompt = _("S/MIME (e)ncrypt, (s)ign, sign (a)s, (b)oth, (p)gp, (c)lear, or (o)ppenc mode? ");
+      letters = _("esabpfco");
+      choices = "esabpfcO";
+    }
+    else
+    {
+      prompt = _("PGP (e)ncrypt, (s)ign, sign (a)s, (b)oth, s/(m)ime, (c)lear, or (o)ppenc mode? ");
+      letters = _("esabmfco");
+      choices = "esabmfcO";
+    }
+  }
+  /*
+   * Opportunistic encryption is unset
+   */
+  else
+  {
+    if (is_smime)
+    {
+      prompt = _("S/MIME (e)ncrypt, (s)ign, sign (a)s, (b)oth, (p)gp or (c)lear? ");
+      letters = _("esabpfc");
+      choices = "esabpfc";
+    }
+    else
+    {
+      prompt = _("PGP (e)ncrypt, (s)ign, sign (a)s, (b)oth, s/(m)ime or (c)lear? ");
+      letters = _("esabmfc");
+      choices = "esabmfc";
+    }
   }
 
-  if (choice == 6 || choice == 7)
-    ;
-  else if (is_smime)
+  choice = mutt_multi_choice (prompt, letters);
+  if (choice > 0)
+  {
+    switch (choices[choice - 1])
     {
-      msg->security &= ~APPLICATION_PGP;
-      msg->security |= APPLICATION_SMIME;
+    case 'e': /* (e)ncrypt */
+      msg->security |= ENCRYPT;
+      msg->security &= ~SIGN;
+      break;
+
+    case 's': /* (s)ign */
+      msg->security &= ~ENCRYPT;
+      msg->security |= SIGN;
+      break;
+
+    case 'S': /* (s)ign in oppenc mode */
+      msg->security |= SIGN;
+      break;
+
+    case 'a': /* sign (a)s */
+      if ((p = crypt_ask_for_key (_("Sign as: "), NULL, KEYFLAG_CANSIGN,
+                                  is_smime? APPLICATION_SMIME:APPLICATION_PGP,
+                                  NULL)))
+      {
+        snprintf (input_signas, sizeof (input_signas), "0x%s",
+            crypt_fpr_or_lkeyid (p));
+        mutt_str_replace (is_smime? &SmimeDefaultKey : &PgpSignAs, input_signas);
+        crypt_free_key (&p); 
+
+        msg->security |= SIGN;
+      }
+      *redraw = REDRAW_FULL;
+      break;
+
+    case 'b': /* (b)oth */
+      msg->security |= (ENCRYPT | SIGN);
+      break;
+
+    case 'p': /* (p)gp or s/(m)ime */
+    case 'm':
+      is_smime = !is_smime;
+      if (is_smime)
+      {
+        msg->security &= ~APPLICATION_PGP;
+        msg->security |= APPLICATION_SMIME;
+      }
+      else
+      {
+        msg->security &= ~APPLICATION_SMIME;
+        msg->security |= APPLICATION_PGP;
+      }
+      crypt_opportunistic_encrypt (msg);
+      break;
+
+    case 'f': /* (f)orget it: kept for backward compatibility. */
+    case 'c': /* (c)lear */
+      msg->security &= ~(ENCRYPT | SIGN);
+      break;
+
+    case 'F': /* (f)orget it or (c)lear in oppenc mode */
+    case 'C':
+      msg->security &= ~SIGN;
+      break;
+
+    case 'O': /* oppenc mode on */
+      msg->security |= OPPENCRYPT;
+      crypt_opportunistic_encrypt (msg);
+      break;
+
+    case 'o': /* oppenc mode off */
+      msg->security &= ~OPPENCRYPT;
+      break;
     }
-  else
-    {
-      msg->security &= ~APPLICATION_SMIME;
-      msg->security |= APPLICATION_PGP;
-    }
-  
+  }
+
   return (msg->security);
 }
 
